@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GeoHash 全景推导与 Z-Order 展示</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; }
+        .bit-box {
+            display: inline-block; width: 24px; height: 24px; line-height: 24px; text-align: center;
+            border: 1px solid #ccc; margin: 1px; font-family: monospace; font-size: 14px; font-weight: bold;
+        }
+        .bit-lon { background-color: #dbeafe; color: #1e40af; border-color: #93c5fd; }
+        .bit-lat { background-color: #dcfce7; color: #166534; border-color: #86efac; }
+        #z-order-canvas { border: 1px solid #e5e7eb; background-color: white; width: 100%; height: 400px; }
+        .section-title { font-size: 1.25rem; font-weight: 700; color: #1f2937; margin-bottom: 1rem; border-left: 4px solid #4f46e5; padding-left: 0.75rem; }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+
+    <div class="max-w-6xl mx-auto space-y-8">
+        
+        <!-- Header -->
+        <div class="bg-white p-6 rounded-lg shadow-md border-t-4 border-indigo-600">
+            <h1 class="text-3xl font-bold text-gray-800">GeoHash 全景推导与 Z-Order 展示</h1>
+            <p class="text-gray-600 mt-2">
+                本页面展示 GeoHash 的完整计算过程，并通过多个随机点演示 <strong>空间邻近性 (Spatial Locality)</strong> 与 <strong>Z 阶曲线 (Z-Order Curve)</strong> 的关系。
+            </p>
+            
+            <!-- Controls -->
+            <div class="mt-6 flex flex-wrap gap-4 items-end bg-gray-50 p-4 rounded-md border border-gray-200">
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 uppercase">中心经度 (Lon)</label>
+                    <input type="number" id="input-lon" value="116.4074" step="0.0001" class="w-28 p-2 border rounded shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 uppercase">中心纬度 (Lat)</label>
+                    <input type="number" id="input-lat" value="39.9042" step="0.0001" class="w-28 p-2 border rounded shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 uppercase">精度 (字符数)</label>
+                    <select id="input-precision" class="w-20 p-2 border rounded shadow-sm outline-none">
+                        <option value="3">3</option>
+                        <option value="4" selected>4</option>
+                        <option value="5">5</option>
+                        <option value="6">6</option>
+                    </select>
+                </div>
+                <div class="flex-grow"></div>
+                <button onclick="refreshAll()" class="bg-indigo-600 text-white px-6 py-2 rounded shadow hover:bg-indigo-700 transition font-semibold">
+                    刷新并生成随机点
+                </button>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            
+            <!-- Left Column: Step-by-Step Logic -->
+            <div class="space-y-6">
+                
+                <!-- Step 1 & 2 -->
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h2 class="section-title">1. 二分逼近 (Binary Approximation)</h2>
+                    <p class="text-sm text-gray-500 mb-4">以中心点为例，计算其经纬度二进制串。</p>
+                    
+                    <div class="grid grid-cols-1 gap-4">
+                        <div class="bg-blue-50 p-3 rounded border border-blue-100">
+                            <span class="font-bold text-blue-800 block mb-1 text-sm">经度 (Longitude) Bits:</span>
+                            <div id="lon-binary-result" class="font-mono text-blue-600 break-all tracking-widest text-sm"></div>
+                        </div>
+                        <div class="bg-green-50 p-3 rounded border border-green-100">
+                            <span class="font-bold text-green-800 block mb-1 text-sm">纬度 (Latitude) Bits:</span>
+                            <div id="lat-binary-result" class="font-mono text-green-600 break-all tracking-widest text-sm"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 3 -->
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h2 class="section-title">2. 位交错 (Interleaving)</h2>
+                    <div class="flex flex-col items-center space-y-2">
+                        <div class="flex items-center space-x-2 w-full">
+                            <span class="w-8 text-right font-bold text-blue-700 text-xs">Lon:</span>
+                            <div id="merge-lon-bits" class="flex flex-wrap"></div>
+                        </div>
+                        <div class="flex items-center space-x-2 w-full">
+                            <span class="w-8 text-right font-bold text-green-700 text-xs">Lat:</span>
+                            <div id="merge-lat-bits" class="flex flex-wrap"></div>
+                        </div>
+                        <div class="text-xl text-gray-300 transform rotate-90 my-1">➜</div>
+                        <div class="flex items-center space-x-2 w-full">
+                            <span class="w-8 text-right font-bold text-purple-700 text-xs">Mix:</span>
+                            <div id="merge-result-bits" class="flex flex-wrap"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 4 -->
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h2 class="section-title">3. Base32 编码结果</h2>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full text-center border-collapse">
+                            <thead>
+                                <tr class="bg-gray-100 text-xs uppercase text-gray-600">
+                                    <th class="p-2 border">Group (5 bits)</th>
+                                    <th class="p-2 border">Binary</th>
+                                    <th class="p-2 border">Dec</th>
+                                    <th class="p-2 border">Char</th>
+                                </tr>
+                            </thead>
+                            <tbody id="base32-table-body" class="text-sm font-mono"></tbody>
+                        </table>
+                    </div>
+                    <div class="mt-4 text-center">
+                        <span id="final-geohash" class="text-4xl font-mono font-bold text-indigo-600 tracking-widest bg-indigo-50 px-4 py-2 rounded border border-indigo-100">-</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Right Column: Z-Order Visualization -->
+            <div class="bg-white p-6 rounded-lg shadow-md h-full">
+                <h2 class="section-title">4. Z-Order 曲线与空间邻近性</h2>
+                <p class="text-sm text-gray-600 mb-4">
+                    图中展示了 <span class="text-red-500 font-bold">中心点 (红)</span> 和周围生成的 <span class="text-blue-500 font-bold">随机点 (蓝)</span>。
+                    <br>
+                    观察 Z 曲线（灰色连线）是如何穿过这些点的。<strong>在空间上相邻的点，在 Z 曲线上通常也是相邻的（GeoHash 前缀相同）。</strong>
+                </p>
+                
+                <canvas id="z-order-canvas"></canvas>
+                
+                <div class="mt-4">
+                    <h3 class="font-bold text-gray-700 text-sm mb-2">随机点列表 (按 Z-Order 排序):</h3>
+                    <div class="bg-gray-50 p-2 rounded border max-h-60 overflow-y-auto text-xs font-mono">
+                        <table class="w-full text-left">
+                            <thead>
+                                <tr class="text-gray-500 border-b">
+                                    <th class="pb-1">类型</th>
+                                    <th class="pb-1">GeoHash</th>
+                                    <th class="pb-1">HashInt (Z-Order)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="points-list"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        const B32_CHARS = '0123456789bcdefghjkmnpqrstuvwxyz';
+        let globalCenter = {};
+        let randomPoints = [];
+
+        function refreshAll() {
+            const lon = parseFloat(document.getElementById('input-lon').value);
+            const lat = parseFloat(document.getElementById('input-lat').value);
+            const precision = parseInt(document.getElementById('input-precision').value);
+            
+            // 1. Calculate Center Point Logic (Steps 1-3)
+            globalCenter = calculateGeoHash(lat, lon, precision);
+            renderSteps(globalCenter);
+
+            // 2. Generate Random Points near center
+            generateRandomPoints(lat, lon, precision);
+
+            // 3. Render Z-Order Curve and Points
+            drawZOrderVisualization();
+            renderPointsList();
+        }
+
+        // --- Core Algorithm ---
+        function calculateGeoHash(lat, lon, precision) {
+            const totalBits = precision * 5;
+            let lonMin = -180, lonMax = 180;
+            let latMin = -90, latMax = 90;
+            let lonBits = [], latBits = [], mergedBits = [];
+            let hashInt = 0; // Simulated integer representation for sorting
+
+            for(let i=0; i<totalBits; i++) {
+                let isEven = (i % 2 === 0);
+                let bit = 0;
+                if (isEven) { // Longitude
+                    let mid = (lonMin + lonMax) / 2;
+                    if (lon > mid) { bit = 1; lonMin = mid; } else { lonMax = mid; }
+                    lonBits.push(bit);
+                } else { // Latitude
+                    let mid = (latMin + latMax) / 2;
+                    if (lat > mid) { bit = 1; latMin = mid; } else { latMax = mid; }
+                    latBits.push(bit);
+                }
+                mergedBits.push(bit);
+                // Simple hashInt accumulation (works for small precision in JS numbers)
+                // For real 52-bit, we need BigInt, but for viz (precision <=6) standard number is ok
+                hashInt = hashInt * 2 + bit; 
+            }
+
+            // Encode Base32
+            let geohash = "";
+            for(let i=0; i<mergedBits.length; i+=5) {
+                const chunk = mergedBits.slice(i, i+5);
+                const val = parseInt(chunk.join(''), 2);
+                geohash += B32_CHARS.charAt(val);
+            }
+
+            return { lat, lon, lonBits, latBits, mergedBits, geohash, hashInt, precision, latMin, latMax, lonMin, lonMax };
+        }
+
+        function generateRandomPoints(centerLat, centerLon, precision) {
+            randomPoints = [];
+            // Generate range roughly within the grid of current precision
+            // Approximate grid size in degrees
+            const step = 180 / Math.pow(2, precision * 2.5); // Rough estimation
+            const range = step * 4; // Generate points in a 4x grid area
+
+            for(let i=0; i<15; i++) {
+                const rLat = centerLat + (Math.random() - 0.5) * range;
+                const rLon = centerLon + (Math.random() - 0.5) * range;
+                // Clamp
+                const safeLat = Math.max(-90, Math.min(90, rLat));
+                const safeLon = Math.max(-180, Math.min(180, rLon));
+                
+                const data = calculateGeoHash(safeLat, safeLon, precision);
+                data.type = 'random';
+                randomPoints.push(data);
+            }
+            
+            // Add center point
+            const centerData = {...globalCenter};
+            centerData.type = 'center';
+            randomPoints.push(centerData);
+
+            // Sort by Hash Integer (Z-Order)
+            randomPoints.sort((a, b) => a.hashInt - b.hashInt);
+        }
+
+        // --- Rendering Logic ---
+        function renderSteps(data) {
+            // Step 1
+            document.getElementById('lon-binary-result').innerText = data.lonBits.join('');
+            document.getElementById('lat-binary-result').innerText = data.latBits.join('');
+
+            // Step 2
+            const lonContainer = document.getElementById('merge-lon-bits');
+            const latContainer = document.getElementById('merge-lat-bits');
+            const resContainer = document.getElementById('merge-result-bits');
+            lonContainer.innerHTML = ''; latContainer.innerHTML = ''; resContainer.innerHTML = '';
+
+            data.lonBits.forEach(b => lonContainer.innerHTML += `<span class="bit-box bit-lon">${b}</span>`);
+            data.latBits.forEach(b => latContainer.innerHTML += `<span class="bit-box bit-lat">${b}</span>`);
+            
+            // Interleave render
+            for(let i=0; i<data.mergedBits.length; i++) {
+                let isEven = (i % 2 === 0);
+                let bitVal = data.mergedBits[i];
+                let typeClass = isEven ? 'bit-lon' : 'bit-lat';
+                resContainer.innerHTML += `<span class="bit-box ${typeClass}">${bitVal}</span>`;
+            }
+
+            // Step 3
+            const tbody = document.getElementById('base32-table-body');
+            tbody.innerHTML = '';
+            for(let i=0; i<data.mergedBits.length; i+=5) {
+                const chunk = data.mergedBits.slice(i, i+5);
+                const binaryStr = chunk.join('');
+                const decimalVal = parseInt(binaryStr, 2);
+                const char = B32_CHARS.charAt(decimalVal);
+                
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="p-2 border">Group ${Math.floor(i/5) + 1}</td>
+                    <td class="p-2 border font-bold">${binaryStr}</td>
+                    <td class="p-2 border">${decimalVal}</td>
+                    <td class="p-2 border text-lg font-bold text-indigo-600">${char}</td>
+                `;
+                tbody.appendChild(tr);
+            }
+            document.getElementById('final-geohash').innerText = data.geohash;
+        }
+
+        function drawZOrderVisualization() {
+            const canvas = document.getElementById('z-order-canvas');
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width = canvas.parentElement.clientWidth;
+            const height = canvas.height = 400;
+            ctx.clearRect(0, 0, width, height);
+
+            // Determine Viewport Bounds based on all points
+            let minLon = 180, maxLon = -180, minLat = 90, maxLat = -90;
+            randomPoints.forEach(p => {
+                if(p.lon < minLon) minLon = p.lon;
+                if(p.lon > maxLon) maxLon = p.lon;
+                if(p.lat < minLat) minLat = p.lat;
+                if(p.lat > maxLat) maxLat = p.lat;
+            });
+            // Add padding
+            const padLon = (maxLon - minLon) * 0.1 || 0.01;
+            const padLat = (maxLat - minLat) * 0.1 || 0.01;
+            minLon -= padLon; maxLon += padLon;
+            minLat -= padLat; maxLat += padLat;
+
+            // Coordinate mapping
+            const mapX = (lon) => (lon - minLon) / (maxLon - minLon) * width;
+            const mapY = (lat) => height - (lat - minLat) / (maxLat - minLat) * height; // Invert Y
+
+            // 1. Draw Grid Lines (Recursively based on precision would be complex, drawing simplified Z-curve connection)
+            // Instead of drawing the full recursive grid (which is hard to align with arbitrary viewport),
+            // We draw the connecting line between sorted points to represent the Z-Order traversal.
+            
+            ctx.beginPath();
+            ctx.strokeStyle = '#e5e7eb';
+            ctx.lineWidth = 2;
+            
+            // Connect points in Z-Order
+            if (randomPoints.length > 0) {
+                const first = randomPoints[0];
+                ctx.moveTo(mapX(first.lon), mapY(first.lat));
+                
+                for(let i=1; i<randomPoints.length; i++) {
+                    const p = randomPoints[i];
+                    ctx.lineTo(mapX(p.lon), mapY(p.lat));
+                }
+            }
+            ctx.stroke();
+
+            // 2. Draw Points
+            randomPoints.forEach((p, idx) => {
+                const x = mapX(p.lon);
+                const y = mapY(p.lat);
+                
+                ctx.beginPath();
+                if (p.type === 'center') {
+                    ctx.fillStyle = '#ef4444'; // Red for center
+                    ctx.arc(x, y, 6, 0, Math.PI * 2);
+                } else {
+                    ctx.fillStyle = '#3b82f6'; // Blue for others
+                    ctx.arc(x, y, 4, 0, Math.PI * 2);
+                }
+                ctx.fill();
+
+                // Draw Order Index
+                ctx.fillStyle = '#1f2937';
+                ctx.font = '10px Arial';
+                ctx.fillText(idx + 1, x + 8, y + 3);
+            });
+        }
+
+        function renderPointsList() {
+            const tbody = document.getElementById('points-list');
+            tbody.innerHTML = '';
+            
+            randomPoints.forEach(p => {
+                const tr = document.createElement('tr');
+                const isCenter = p.type === 'center';
+                tr.className = isCenter ? 'bg-red-50 font-bold' : '';
+                tr.innerHTML = `
+                    <td class="pb-1 ${isCenter ? 'text-red-600' : 'text-blue-600'}">${isCenter ? 'Center' : 'Rand'}</td>
+                    <td class="pb-1 font-mono">${p.geohash}</td>
+                    <td class="pb-1 text-gray-500">${p.hashInt}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // Init
+        refreshAll();
+    </script>
+</body>
+</html>
