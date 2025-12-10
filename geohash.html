@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis GeoHash 可视化原理演示</title>
+    <!-- 引入 Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- 引入 Tailwind CSS 用于快速布局 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #map { height: 500px; width: 100%; border-radius: 8px; z-index: 1; }
+        .grid-label {
+            font-size: 12px;
+            font-weight: bold;
+            color: rgba(255, 0, 0, 0.7);
+            text-align: center;
+            text-shadow: 1px 1px 0 #fff;
+        }
+        .bit-box {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            line-height: 20px;
+            text-align: center;
+            border: 1px solid #ccc;
+            margin-right: 2px;
+            font-size: 12px;
+            font-family: monospace;
+        }
+        .bit-lon { background-color: #dbeafe; color: #1e40af; border-color: #93c5fd; }
+        .bit-lat { background-color: #dcfce7; color: #166534; border-color: #86efac; }
+    </style>
+</head>
+<body class="bg-gray-100 p-6">
+
+    <div class="max-w-6xl mx-auto space-y-6">
+        
+        <!-- Header -->
+        <div class="bg-white p-6 rounded-lg shadow-md">
+            <h1 class="text-3xl font-bold text-gray-800 mb-2">Redis GeoHash 原理可视化</h1>
+            <p class="text-gray-600">
+                本页面展示 GeoHash 如何将二维经纬度映射为一维字符串（Z-Order Curve），以及 Redis 如何利用它进行邻近搜索。
+            </p>
+        </div>
+
+        <!-- Main Content Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            
+            <!-- Left: Interactive Map -->
+            <div class="lg:col-span-2 bg-white p-4 rounded-lg shadow-md">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold text-gray-700">网格可视化 (Z 阶曲线)</h2>
+                    <div class="text-sm text-gray-500">
+                        当前精度 (Precision): <span id="precision-display" class="font-bold text-blue-600">5</span> 
+                        <input type="range" id="precision-slider" min="1" max="8" value="5" class="ml-2 align-middle">
+                    </div>
+                </div>
+                <div id="map"></div>
+                <p class="mt-2 text-sm text-gray-500">
+                    * 拖动地图或缩放查看网格变化。红色矩形代表当前鼠标所在位置的 GeoHash 格子。
+                    <br>
+                    * 周围的 <span class="text-green-600 font-bold">绿色框</span> 代表 Redis `GEORADIUS` 搜索时会检查的 8 个邻居。
+                </p>
+            </div>
+
+            <!-- Right: Encoding Logic -->
+            <div class="bg-white p-4 rounded-lg shadow-md space-y-6">
+                
+                <!-- Input Section -->
+                <div>
+                    <h2 class="text-xl font-semibold text-gray-700 mb-3">编码演示 (Encoding)</h2>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">经度 (Longitude)</label>
+                            <input type="number" id="input-lon" value="121.4737" step="0.0001" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border p-2">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">纬度 (Latitude)</label>
+                            <input type="number" id="input-lat" value="31.2304" step="0.0001" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border p-2">
+                        </div>
+                        <button onclick="calculateGeoHash()" class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700 transition">计算 GeoHash</button>
+                    </div>
+                </div>
+
+                <!-- Result Section -->
+                <div id="result-area" class="hidden">
+                    <div class="border-t pt-4">
+                        <h3 class="font-bold text-gray-800">1. 二分逼近 (Binary Approximation)</h3>
+                        <div class="mt-2 text-xs font-mono bg-gray-50 p-2 rounded overflow-x-auto">
+                            <div class="mb-1"><span class="text-blue-600 font-bold">经度二分:</span> <span id="lon-bits"></span></div>
+                            <div><span class="text-green-600 font-bold">纬度二分:</span> <span id="lat-bits"></span></div>
+                        </div>
+                    </div>
+
+                    <div class="border-t pt-4 mt-4">
+                        <h3 class="font-bold text-gray-800">2. 位交错 (Interleaving)</h3>
+                        <p class="text-xs text-gray-500 mb-2">偶数位放经度(蓝)，奇数位放纬度(绿)</p>
+                        <div id="interleaved-bits" class="flex flex-wrap gap-y-1"></div>
+                    </div>
+
+                    <div class="border-t pt-4 mt-4">
+                        <h3 class="font-bold text-gray-800">3. Base32 编码结果</h3>
+                        <div class="mt-2 text-center">
+                            <span id="geohash-result" class="text-3xl font-mono font-bold text-indigo-600 tracking-widest"></span>
+                        </div>
+                        <div class="mt-2 text-xs text-center text-gray-500">
+                            Redis 实际上存储的是 52-bit 的整数 (Score)
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- 引入 Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- 引入 geohash.js (这里我们内联一个简易实现) -->
+    <script>
+        // --- 简易 GeoHash 算法实现 ---
+        const B32_CHARS = '0123456789bcdefghjkmnpqrstuvwxyz';
+        
+        function encodeGeoHash(lat, lon, precision) {
+            let isEven = true;
+            let latMin = -90, latMax = 90;
+            let lonMin = -180, lonMax = 180;
+            let bit = 0;
+            let ch = 0;
+            let geohash = "";
+            let bitsLog = { lat: [], lon: [], interleaved: [] };
+
+            while (geohash.length < precision) {
+                let mid;
+                if (isEven) {
+                    mid = (lonMin + lonMax) / 2;
+                    if (lon > mid) {
+                        ch |= (1 << (4 - bit));
+                        lonMin = mid;
+                        bitsLog.lon.push(1);
+                        bitsLog.interleaved.push({val: 1, type: 'lon'});
+                    } else {
+                        lonMax = mid;
+                        bitsLog.lon.push(0);
+                        bitsLog.interleaved.push({val: 0, type: 'lon'});
+                    }
+                } else {
+                    mid = (latMin + latMax) / 2;
+                    if (lat > mid) {
+                        ch |= (1 << (4 - bit));
+                        latMin = mid;
+                        bitsLog.lat.push(1);
+                        bitsLog.interleaved.push({val: 1, type: 'lat'});
+                    } else {
+                        latMax = mid;
+                        bitsLog.lat.push(0);
+                        bitsLog.interleaved.push({val: 0, type: 'lat'});
+                    }
+                }
+                isEven = !isEven;
+                if (bit < 4) {
+                    bit++;
+                } else {
+                    geohash += B32_CHARS.charAt(ch);
+                    bit = 0;
+                    ch = 0;
+                }
+            }
+            return { geohash, bitsLog, bounds: { latMin, latMax, lonMin, lonMax } };
+        }
+
+        // --- 计算 GeoHash 矩形边界 ---
+        function decodeGeoHashBox(geohash) {
+            let isEven = true;
+            let latMin = -90, latMax = 90;
+            let lonMin = -180, lonMax = 180;
+            
+            for (let i = 0; i < geohash.length; i++) {
+                let chr = geohash.charAt(i);
+                let idx = B32_CHARS.indexOf(chr);
+                for (let n = 4; n >= 0; n--) {
+                    let bitN = (idx >> n) & 1;
+                    if (isEven) {
+                        let mid = (lonMin + lonMax) / 2;
+                        if (bitN == 1) lonMin = mid; else lonMax = mid;
+                    } else {
+                        let mid = (latMin + latMax) / 2;
+                        if (bitN == 1) latMin = mid; else latMax = mid;
+                    }
+                    isEven = !isEven;
+                }
+            }
+            return [ [latMin, lonMin], [latMax, lonMax] ]; // Leaflet bounds format
+        }
+
+        // --- 获取 8 个邻居 ---
+        function getNeighbors(geohash) {
+            // 这里为了演示简单，仅计算边界框并模拟邻居
+            // 实际算法需根据奇偶位复杂计算，这里简化为重新计算周围点的 hash
+            const box = decodeGeoHashBox(geohash);
+            const latMid = (box[0][0] + box[1][0]) / 2;
+            const lonMid = (box[0][1] + box[1][1]) / 2;
+            const latH = (box[1][0] - box[0][0]);
+            const lonW = (box[1][1] - box[0][1]);
+            
+            const neighbors = [];
+            for(let x=-1; x<=1; x++) {
+                for(let y=-1; y<=1; y++) {
+                    if(x===0 && y===0) continue;
+                    // 取每个邻居格子的中心点重新编码
+                    const nLat = latMid + y * latH;
+                    const nLon = lonMid + x * lonW;
+                    // 简单处理边界溢出
+                    if(Math.abs(nLat) <= 90 && Math.abs(nLon) <= 180) {
+                        neighbors.push(encodeGeoHash(nLat, nLon, geohash.length).geohash);
+                    }
+                }
+            }
+            return [...new Set(neighbors)]; // 去重
+        }
+
+        // --- 地图逻辑 ---
+        const map = L.map('map').setView([31.2304, 121.4737], 11);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        let currentGridLayer = L.layerGroup().addTo(map);
+        let currentMarker = L.marker([31.2304, 121.4737], {draggable: true}).addTo(map);
+        
+        // 渲染网格
+        function renderGrid(centerLat, centerLon, precision) {
+            currentGridLayer.clearLayers();
+            
+            // 1. 计算中心点的 GeoHash
+            const centerHash = encodeGeoHash(centerLat, centerLon, precision).geohash;
+            const centerBounds = decodeGeoHashBox(centerHash);
+            
+            // 绘制中心格子 (红色)
+            L.rectangle(centerBounds, {color: "#ff0000", weight: 2, fillOpacity: 0.2})
+             .bindTooltip(centerHash, {permanent: true, direction: "center", className: "grid-label"})
+             .addTo(currentGridLayer);
+
+            // 2. 计算邻居 (Redis 九宫格策略)
+            const neighbors = getNeighbors(centerHash);
+            neighbors.forEach(nh => {
+                const bounds = decodeGeoHashBox(nh);
+                L.rectangle(bounds, {color: "#16a34a", weight: 1, fillOpacity: 0.1})
+                 .bindTooltip(nh, {permanent: false, direction: "center"})
+                 .addTo(currentGridLayer);
+            });
+        }
+
+        // --- 交互逻辑 ---
+        function updateAll() {
+            const lat = parseFloat(document.getElementById('input-lat').value);
+            const lon = parseFloat(document.getElementById('input-lon').value);
+            const precision = parseInt(document.getElementById('precision-slider').value);
+            
+            document.getElementById('precision-display').innerText = precision;
+            
+            // 更新地图
+            currentMarker.setLatLng([lat, lon]);
+            renderGrid(lat, lon, precision); // 渲染网格
+            
+            // 更新右侧计算过程
+            const result = encodeGeoHash(lat, lon, precision);
+            
+            document.getElementById('result-area').classList.remove('hidden');
+            document.getElementById('lon-bits').innerText = result.bitsLog.lon.join('');
+            document.getElementById('lat-bits').innerText = result.bitsLog.lat.join('');
+            
+            const interleavedContainer = document.getElementById('interleaved-bits');
+            interleavedContainer.innerHTML = '';
+            result.bitsLog.interleaved.forEach(bit => {
+                const span = document.createElement('span');
+                span.className = `bit-box ${bit.type === 'lon' ? 'bit-lon' : 'bit-lat'}`;
+                span.innerText = bit.val;
+                interleavedContainer.appendChild(span);
+            });
+            
+            document.getElementById('geohash-result').innerText = result.geohash;
+        }
+
+        // 事件监听
+        document.getElementById('precision-slider').addEventListener('input', updateAll);
+        
+        currentMarker.on('dragend', function(e) {
+            const pos = e.target.getLatLng();
+            document.getElementById('input-lat').value = pos.lat.toFixed(4);
+            document.getElementById('input-lon').value = pos.lng.toFixed(4);
+            updateAll();
+        });
+
+        map.on('click', function(e) {
+            currentMarker.setLatLng(e.latlng);
+            document.getElementById('input-lat').value = e.latlng.lat.toFixed(4);
+            document.getElementById('input-lon').value = e.latlng.lng.toFixed(4);
+            updateAll();
+        });
+
+        // 初始化
+        calculateGeoHash = updateAll; // 绑定按钮
+        updateAll();
+
+    </script>
+</body>
+</html>
